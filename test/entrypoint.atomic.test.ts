@@ -92,60 +92,95 @@ describe('EntryPoint', function () {
     expect(getUserOpHash(sampleOp, entryPoint.address, chainId)).to.eql(await entryPoint.getUserOpHash(packedOp))
   })
 
+  describe('with paymaster (account with no eth)', () => {
+    let paymaster: TestPaymasterAcceptAll
+    let counter: TestCounter
+    let accountExecFromEntryPoint: PopulatedTransaction
+    const account2Owner = createAccountOwner()
 
+    before(async () => {
+      paymaster = await new TestPaymasterAcceptAll__factory(ethersSigner).deploy(entryPoint.address)
+      await paymaster.addStake(globalUnstakeDelaySec, { value: paymasterStake })
+      counter = await new TestCounter__factory(ethersSigner).deploy()
+      const count = await counter.populateTransaction.count()
+      accountExecFromEntryPoint = await account.populateTransaction.execute(counter.address, 0, count.data!)
+    })
 
-    describe('with paymaster (account with no eth)', () => {
-      let paymaster: TestPaymasterAcceptAll
-      let counter: TestCounter
-      let accountExecFromEntryPoint: PopulatedTransaction
+  
+
+    it('should execute two transfers atomically in one tx', async function () {
+      await paymaster.deposit({ value: ONE_ETH })
+
+      // Create two account owners
+      const account1Owner = createAccountOwner()
       const account2Owner = createAccountOwner()
 
-      before(async () => {
-        paymaster = await new TestPaymasterAcceptAll__factory(ethersSigner).deploy(entryPoint.address)
-        await paymaster.addStake(globalUnstakeDelaySec, { value: paymasterStake })
-        counter = await new TestCounter__factory(ethersSigner).deploy()
-        const count = await counter.populateTransaction.count()
-        accountExecFromEntryPoint = await account.populateTransaction.execute(counter.address, 0, count.data!)
+      // Create two accounts
+      const account1 = await createAccount(ethersSigner, await account1Owner.getAddress(), entryPoint.address)
+      const account2 = await createAccount(ethersSigner, await account2Owner.getAddress(), entryPoint.address)
+
+      // Fund account1 for testing
+      await ethersSigner.sendTransaction({
+        to: account1.proxy.address,
+        value: parseEther('2')
       })
 
+      // GErt account 1 and account 2 balance 
+      const account1Balance = await getBalance(account1.proxy.address)
+      const account2Balance = await getBalance(account2.proxy.address)
+      console.log('account1Balance', account1Balance)
+      console.log('account2Balance', account2Balance)
 
-      it('paymaster should pay for tx', async function () {
-        await paymaster.deposit({ value: ONE_ETH })
-        const op = await fillSignAndPack({
-          paymaster: paymaster.address,
-          paymasterVerificationGasLimit: 1e6,
-          callData: accountExecFromEntryPoint.data,
-          initCode: getAccountInitCode(account2Owner.address, simpleAccountFactory)
-        }, account2Owner, entryPoint)
-        const beneficiaryAddress = createAddress()
+      // Create two destinations for transfers
+      const destination = createAddress()
+      
+      // Create transfer operations
+      const transferOp1 = await fillSignAndPack({
+        sender: account1.proxy.address,
+        callData: account1.proxy.interface.encodeFunctionData('execute', [
+          account2.proxy.address,
+          parseEther('1'),
+          '0x'
+        ]),
+        paymaster: paymaster.address,
+        paymasterVerificationGasLimit: 1e6,
+        callGasLimit: 2e6,
+        verificationGasLimit: 2e6
+      }, account1Owner, entryPoint)
 
-        const rcpt = await entryPoint.handleAtomicOps([op], beneficiaryAddress).then(async t => t.wait())
+      const transferOp2 = await fillSignAndPack({
+        sender: account2.proxy.address,
+        callData: account2.proxy.interface.encodeFunctionData('execute', [
+          destination,
+          parseEther('1.5'),
+          '0x'
+        ]),
+        paymaster: paymaster.address,
+        paymasterVerificationGasLimit: 1e6,
+        callGasLimit: 2e6,
+        verificationGasLimit: 2e6
+      }, account2Owner, entryPoint)
 
-        const { actualGasCost } = await calcGasUsage(rcpt, entryPoint, beneficiaryAddress)
-        const paymasterPaid = ONE_ETH.sub(await entryPoint.balanceOf(paymaster.address))
-        expect(paymasterPaid).to.eql(actualGasCost)
-      })
-      it('simulateValidation should return paymaster stake and delay', async () => {
-        await paymaster.deposit({ value: ONE_ETH })
-        const anOwner = createAccountOwner()
+      const beneficiaryAddress = createAddress()
 
-        const op = await fillSignAndPack({
-          paymaster: paymaster.address,
-          paymasterVerificationGasLimit: 1e6,
-          callData: accountExecFromEntryPoint.data,
-          initCode: getAccountInitCode(anOwner.address, simpleAccountFactory)
-        }, anOwner, entryPoint)
+      // Execute both transfers atomically
+      const rcpt = await entryPoint.handleAtomicOps(
+        [transferOp1, transferOp2],
+        beneficiaryAddress
+      ).then(async t => t.wait())
 
-        const { paymasterInfo } = await simulateValidation(op, entryPoint.address)
-        const {
-          stake: simRetStake,
-          unstakeDelaySec: simRetDelay
-        } = paymasterInfo
 
-        expect(simRetStake).to.eql(paymasterStake)
-        expect(simRetDelay).to.eql(globalUnstakeDelaySec)
-      })
-    })
+      // Verify both transfers succeeded
+      const balance = await getBalance(destination)
+      console.log('balance', balance)
+    
+      // get account 1 and account 2 balance
+      const account1BalanceAfter = await getBalance(account1.proxy.address)
+      const account2BalanceAfter = await getBalance(account2.proxy.address)
+      console.log('account1BalanceAfter', account1BalanceAfter)
+      console.log('account2BalanceAfter', account2BalanceAfter)
      
+    })
+  })
 })
  

@@ -184,10 +184,10 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuard,
             }
             if (methodSig == IAccountExecute.executeUserOp.selector) {
                 bytes memory executeUserOp = abi.encodeCall(IAccountExecute.executeUserOp, (userOp, opInfo.userOpHash));
-                innerCall = abi.encodeCall(this.innerHandleOp, (executeUserOp, opInfo, context));
+                innerCall = abi.encodeCall(this.innerHandleOpAtomic, (executeUserOp, opInfo, context));
             } else
             {
-                innerCall = abi.encodeCall(this.innerHandleOp, (callData, opInfo, context));
+                innerCall = abi.encodeCall(this.innerHandleOpAtomic, (callData, opInfo, context));
             }
             assembly ("memory-safe") {
                 success := call(gas(), address(), 0, add(innerCall, 0x20), mload(innerCall), 0, 32)
@@ -195,6 +195,7 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuard,
                 mstore(0x40, saveFreePtr)
             }
         }
+
         if (!success) {
             bytes32 innerRevertCode;
             assembly ("memory-safe") {
@@ -457,6 +458,46 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuard,
                     );
                 }
                 mode = IPaymaster.PostOpMode.opReverted;
+            }
+        }
+
+        unchecked {
+            uint256 actualGas = preGas - gasleft() + opInfo.preOpGas;
+            return _postExecution(mode, opInfo, context, actualGas);
+        }
+    }
+
+
+    function innerHandleOpAtomic(
+        bytes memory callData,
+        UserOpInfo memory opInfo,
+        bytes calldata context
+    ) external returns (uint256 actualGasCost) {
+        uint256 preGas = gasleft();
+        require(msg.sender == address(this), "AA92 internal call only");
+        MemoryUserOp memory mUserOp = opInfo.mUserOp;
+
+        uint256 callGasLimit = mUserOp.callGasLimit;
+        unchecked {
+            // handleOps was called with gas limit too low. abort entire bundle.
+            if (
+                gasleft() * 63 / 64 <
+                callGasLimit +
+                mUserOp.paymasterPostOpGasLimit +
+                INNER_GAS_OVERHEAD
+            ) {
+                assembly ("memory-safe") {
+                    mstore(0, INNER_OUT_OF_GAS)
+                    revert(0, 32)
+                }
+            }
+        }
+
+        IPaymaster.PostOpMode mode = IPaymaster.PostOpMode.opSucceeded;
+        if (callData.length > 0) {
+            bool success = Exec.call(mUserOp.sender, 0, callData, callGasLimit);
+            if (!success) {
+                revert FailedOp(0, "Atomic Operation failed");
             }
         }
 
