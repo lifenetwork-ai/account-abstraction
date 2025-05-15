@@ -149,6 +149,80 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuard,
             }
         }
     }
+    
+    /**
+     * Execute a user operation.
+     * @param opIndex    - Index into the opInfo array.
+     * @param userOp     - The userOp to execute.
+     * @param opInfo     - The opInfo filled by validatePrepayment for this userOp.
+     * @return collected - The total amount this userOp paid.
+     */
+    function _executeUserOpAtomic(
+        uint256 opIndex,
+        PackedUserOperation calldata userOp,
+        UserOpInfo memory opInfo
+    )
+    internal
+    returns
+    (uint256 collected) {
+        uint256 preGas = gasleft();
+        bytes memory context = getMemoryBytesFromOffset(opInfo.contextOffset);
+        bool success;
+        {
+            uint256 saveFreePtr;
+            assembly ("memory-safe") {
+                saveFreePtr := mload(0x40)
+            }
+            bytes calldata callData = userOp.callData;
+            bytes memory innerCall;
+            bytes4 methodSig;
+            assembly {
+                let len := callData.length
+                if gt(len, 3) {
+                    methodSig := calldataload(callData.offset)
+                }
+            }
+            if (methodSig == IAccountExecute.executeUserOp.selector) {
+                bytes memory executeUserOp = abi.encodeCall(IAccountExecute.executeUserOp, (userOp, opInfo.userOpHash));
+                innerCall = abi.encodeCall(this.innerHandleOpAtomic, (executeUserOp, opInfo, context));
+            } else
+            {
+                innerCall = abi.encodeCall(this.innerHandleOpAtomic, (callData, opInfo, context));
+            }
+            assembly ("memory-safe") {
+                success := call(gas(), address(), 0, add(innerCall, 0x20), mload(innerCall), 0, 32)
+                collected := mload(0)
+                mstore(0x40, saveFreePtr)
+            }
+        }
+
+        if (!success) {
+            bytes32 innerRevertCode;
+            assembly ("memory-safe") {
+                let len := returndatasize()
+                if eq(32,len) {
+                    returndatacopy(0, 0, 32)
+                    innerRevertCode := mload(0)
+                }
+            }
+            if (innerRevertCode == INNER_OUT_OF_GAS) {
+                // handleOps was called with gas limit too low. abort entire bundle.
+                //can only be caused by bundler (leaving not enough gas for inner call)
+                revert FailedOp(opIndex, "AA95 out of gas");
+            } else if (innerRevertCode == INNER_REVERT_LOW_PREFUND) {
+                // innerCall reverted on prefund too low. treat entire prefund as "gas cost"
+                uint256 actualGas = preGas - gasleft() + opInfo.preOpGas;
+                uint256 actualGasCost = opInfo.prefund;
+                emitPrefundTooLow(opInfo);
+                emitUserOperationEvent(opInfo, false, actualGasCost, actualGas);
+                collected = actualGasCost;
+            } else {
+                revert FailedOp(opIndex, "Operation failed");
+            }
+        }
+    }
+
+
 
     function emitUserOperationEvent(UserOpInfo memory opInfo, bool success, uint256 actualGasCost, uint256 actualGas) internal virtual {
         emit UserOperationEvent(
@@ -198,6 +272,40 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuard,
 
             for (uint256 i = 0; i < opslen; i++) {
                 collected += _executeUserOp(i, ops[i], opInfos[i]);
+            }
+
+            _compensate(beneficiary, collected);
+        }
+    }
+
+
+    function handleAtomicOps(
+        PackedUserOperation[] calldata ops,
+        address payable beneficiary
+    ) public nonReentrant {
+        uint256 opslen = ops.length;
+        UserOpInfo[] memory opInfos = new UserOpInfo[](opslen);
+
+        unchecked {
+            for (uint256 i = 0; i < opslen; i++) {
+                UserOpInfo memory opInfo = opInfos[i];
+                (
+                    uint256 validationData,
+                    uint256 pmValidationData
+                ) = _validatePrepayment(i, ops[i], opInfo);
+                _validateAccountAndPaymasterValidationData(
+                    i,
+                    validationData,
+                    pmValidationData,
+                    address(0)
+                );
+            }
+
+            uint256 collected = 0;
+            emit BeforeExecution();
+
+            for (uint256 i = 0; i < opslen; i++) {
+                collected += _executeUserOpAtomic(i, ops[i], opInfos[i]);
             }
 
             _compensate(beneficiary, collected);
@@ -350,6 +458,46 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuard,
                     );
                 }
                 mode = IPaymaster.PostOpMode.opReverted;
+            }
+        }
+
+        unchecked {
+            uint256 actualGas = preGas - gasleft() + opInfo.preOpGas;
+            return _postExecution(mode, opInfo, context, actualGas);
+        }
+    }
+
+
+    function innerHandleOpAtomic(
+        bytes memory callData,
+        UserOpInfo memory opInfo,
+        bytes calldata context
+    ) external returns (uint256 actualGasCost) {
+        uint256 preGas = gasleft();
+        require(msg.sender == address(this), "AA92 internal call only");
+        MemoryUserOp memory mUserOp = opInfo.mUserOp;
+
+        uint256 callGasLimit = mUserOp.callGasLimit;
+        unchecked {
+            // handleOps was called with gas limit too low. abort entire bundle.
+            if (
+                gasleft() * 63 / 64 <
+                callGasLimit +
+                mUserOp.paymasterPostOpGasLimit +
+                INNER_GAS_OVERHEAD
+            ) {
+                assembly ("memory-safe") {
+                    mstore(0, INNER_OUT_OF_GAS)
+                    revert(0, 32)
+                }
+            }
+        }
+
+        IPaymaster.PostOpMode mode = IPaymaster.PostOpMode.opSucceeded;
+        if (callData.length > 0) {
+            bool success = Exec.call(mUserOp.sender, 0, callData, callGasLimit);
+            if (!success) {
+                revert FailedOp(0, "Atomic Operation failed");
             }
         }
 
