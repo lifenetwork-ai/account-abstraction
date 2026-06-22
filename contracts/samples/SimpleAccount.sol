@@ -7,6 +7,8 @@ pragma solidity ^0.8.23;
 
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import "../core/BaseAccount.sol";
@@ -18,9 +20,15 @@ import "./callback/TokenCallbackHandler.sol";
   *  this is sample minimal account.
   *  has execute, eth handling methods
   *  has a single signer that can send requests through the entryPoint.
+  *  implements ERC-1271 so off-chain signatures (e.g. EIP-712 votes) made by the owner
+  *  can be verified against this account address via SignatureChecker.
   */
-contract SimpleAccount is BaseAccount, TokenCallbackHandler, UUPSUpgradeable, Initializable {
+contract SimpleAccount is BaseAccount, TokenCallbackHandler, IERC1271, UUPSUpgradeable, Initializable {
     address public owner;
+
+    // ERC-1271 magic value returned when a signature is valid (see EIP-1271).
+    bytes4 internal constant ERC1271_MAGIC_VALUE = 0x1626ba7e;
+    bytes4 internal constant ERC1271_INVALID = 0xffffffff;
 
     IEntryPoint private immutable _entryPoint;
 
@@ -108,6 +116,21 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, UUPSUpgradeable, In
         if (owner != ECDSA.recover(hash, userOp.signature))
             return SIG_VALIDATION_FAILED;
         return SIG_VALIDATION_SUCCESS;
+    }
+
+    /**
+     * @inheritdoc IERC1271
+     * @dev ERC-1271 signature validation for off-chain signed messages (e.g. EIP-712 votes).
+     *   Returns the ERC-1271 magic value when `signature` is a valid signature over `hash` by the
+     *   owner. SignatureChecker supports both an EOA owner (ECDSA) and a contract owner (nested
+     *   ERC-1271). `hash` is the final digest the caller already produced (no extra prefixing).
+     */
+    function isValidSignature(bytes32 hash, bytes calldata signature)
+    external view override returns (bytes4 magicValue) {
+        if (SignatureChecker.isValidSignatureNow(owner, hash, signature)) {
+            return ERC1271_MAGIC_VALUE;
+        }
+        return ERC1271_INVALID;
     }
 
     function _call(address target, uint256 value, bytes memory data) internal {
