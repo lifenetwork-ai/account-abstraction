@@ -164,4 +164,41 @@ describe('SimpleAccount', function () {
       expect(await isDeployed(target)).to.eq(true)
     })
   })
+
+  describe('#isValidSignature (ERC-1271)', () => {
+    const ERC1271_MAGIC_VALUE = '0x1626ba7e'
+    const ERC1271_INVALID = '0xffffffff'
+    let account: SimpleAccount
+    let owner: Wallet
+
+    before(async () => {
+      owner = createAccountOwner();
+      ({ proxy: account } = await createAccount(ethersSigner, owner.address, entryPoint))
+    })
+
+    // The owner signs the raw 32-byte digest (no personal-sign prefix), matching how
+    // SignatureChecker.isValidSignatureNow / ECDSA.recover validate it on-chain — and how an
+    // EIP-712 typed-data signature is produced by the wallet.
+    const signDigest = (signer: Wallet, hash: string): string =>
+      ethers.utils.joinSignature(signer._signingKey().signDigest(hash))
+
+    it('returns the magic value for a valid owner signature', async () => {
+      const hash = ethers.utils.keccak256('0xdeadbeef')
+      const sig = signDigest(owner, hash)
+      expect(await account.isValidSignature(hash, sig)).to.equal(ERC1271_MAGIC_VALUE)
+    })
+
+    it('returns the invalid value for a non-owner signature', async () => {
+      const stranger = createAccountOwner()
+      const hash = ethers.utils.keccak256('0xdeadbeef')
+      const sig = signDigest(stranger, hash)
+      expect(await account.isValidSignature(hash, sig)).to.equal(ERC1271_INVALID)
+    })
+
+    it('returns the invalid value when the signed hash differs', async () => {
+      const sig = signDigest(owner, ethers.utils.keccak256('0x1111'))
+      const otherHash = ethers.utils.keccak256('0x2222')
+      expect(await account.isValidSignature(otherHash, sig)).to.equal(ERC1271_INVALID)
+    })
+  })
 })
