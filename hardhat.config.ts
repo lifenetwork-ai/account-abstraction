@@ -60,7 +60,14 @@ const config: HardhatUserConfig = {
     localgeth: { url: 'http://localgeth:8545' },
     goerli: getNetwork('goerli'),
     sepolia: getNetwork('sepolia'),
-    proxy: getNetwork1('http://localhost:8545')
+    proxy: getNetwork1('http://localhost:8545'),
+    // Life AI test subnet (Avalanche). Deployer key via DEPLOYER_PRIVATE_KEY env.
+    lifeaitest: {
+      url: process.env.CHAIN_RPC_URL ?? 'https://subnets.avax.network/lifeaitest/testnet/rpc',
+      accounts: process.env.DEPLOYER_PRIVATE_KEY != null
+        ? [process.env.DEPLOYER_PRIVATE_KEY]
+        : { mnemonic }
+    }
   },
   mocha: {
     timeout: 10000
