@@ -125,12 +125,11 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, IERC1271, UUPSUpgra
      *   owner. SignatureChecker supports both an EOA owner (ECDSA) and a contract owner (nested
      *   ERC-1271). `hash` is the final digest the caller already produced (no extra prefixing).
      */
-    function isValidSignature(bytes32 hash, bytes calldata signature)
+    function isValidSignature(bytes32 hash, bytes memory signature)
     external view override returns (bytes4 magicValue) {
-        if (SignatureChecker.isValidSignatureNow(owner, hash, signature)) {
-            return ERC1271_MAGIC_VALUE;
-        }
-        return ERC1271_INVALID;
+        return SignatureChecker.isValidSignatureNow(owner, hash, signature)
+            ? ERC1271_MAGIC_VALUE
+            : ERC1271_INVALID;
     }
 
     function _call(address target, uint256 value, bytes memory data) internal {
